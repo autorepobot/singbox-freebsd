@@ -26,28 +26,28 @@ jobs:
       matrix:
         include:
           - name: x64
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
             vm_arch: x86_64
             goarch: amd64
             go_host_arch: amd64
             freebsd: "15.1"
 
           - name: x86
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
             vm_arch: x86_64
             goarch: "386"
             go_host_arch: amd64
             freebsd: "14.5"
 
           - name: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             vm_arch: aarch64
             goarch: arm64
             go_host_arch: arm64
             freebsd: "15.1"
 
           - name: riscv64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             vm_arch: aarch64
             goarch: riscv64
             go_host_arch: arm64
@@ -159,7 +159,7 @@ jobs:
   release:
     name: Release
     needs: build
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
 
     steps:
       - uses: actions/download-artifact@v8
