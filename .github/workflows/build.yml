@@ -1,0 +1,186 @@
+name: Build sing-box FreeBSD
+
+on:
+  workflow_dispatch:
+    inputs:
+      singbox_ref:
+        description: "sing-box tag / branch / commit"
+        required: true
+        default: "v1.14.2"
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: "1.25.14"
+
+jobs:
+  build:
+    name: FreeBSD ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x64
+            vm_arch: x86_64
+            goarch: amd64
+            go_host_arch: amd64
+            freebsd: "15.1"
+            sync: rsync
+
+          - name: x86
+            vm_arch: x86_64
+            goarch: "386"
+            go_host_arch: amd64
+            freebsd: "14.5"
+            sync: rsync
+
+          - name: arm64
+            vm_arch: aarch64
+            goarch: arm64
+            go_host_arch: arm64
+            freebsd: "15.1"
+            sync: rsync
+
+          - name: riscv64
+            vm_arch: riscv64
+            goarch: riscv64
+            go_host_arch: riscv64
+            freebsd: "15.1"
+            sync: scp
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          repository: SagerNet/sing-box
+          ref: ${{ inputs.singbox_ref }}
+          path: sing-box
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build
+        uses: vmactions/freebsd-vm@v1.5.8
+        with:
+          release: ${{ matrix.freebsd }}
+          arch: ${{ matrix.vm_arch }}
+          sync: ${{ matrix.sync }}
+          copyback: true
+          run: |
+            set -eu
+
+            GO_VERSION="${{ env.GO_VERSION }}"
+            GO_HOST_ARCH="${{ matrix.go_host_arch }}"
+            GOARCH="${{ matrix.goarch }}"
+            NAME="sing-box-freebsd-${{ matrix.name }}"
+            VERSION="${{ inputs.singbox_ref }}"
+            VERSION="${VERSION#v}"
+
+            fetch -o /tmp/go.tar.gz \
+              "https://go.dev/dl/go${GO_VERSION}.freebsd-${GO_HOST_ARCH}.tar.gz"
+
+            rm -rf /usr/local/go
+            tar -C /usr/local -xzf /tmp/go.tar.gz
+
+            export PATH="/usr/local/go/bin:$PATH"
+            export GOTOOLCHAIN=local
+            export GOPROXY="https://proxy.golang.org"
+
+            cd sing-box
+
+            go mod vendor
+
+            PATCH_BASE="https://raw.githubusercontent.com/freebsd/freebsd-ports/main/net/sing-box/files"
+
+            PATCHES="
+            patch-vendor_github.com_sagernet_sing-tun_monitor__freebsd.go
+            patch-vendor_github.com_sagernet_sing-tun_monitor__other.go
+            patch-vendor_github.com_sagernet_sing-tun_monitor__shared.go
+            patch-vendor_github.com_sagernet_sing-tun_tun__freebsd.go
+            patch-vendor_github.com_sagernet_sing-tun_tun__freebsd__gvisor.go
+            patch-vendor_github.com_sagernet_sing-tun_tun__nondarwin.go
+            patch-vendor_github.com_sagernet_sing-tun_tun__other.go
+            "
+
+            mkdir -p .freebsd-patches
+
+            for p in ${PATCHES}; do
+              fetch -o ".freebsd-patches/${p}" "${PATCH_BASE}/${p}"
+              patch -f -p0 < ".freebsd-patches/${p}"
+            done
+
+            mkdir -p "../dist/${NAME}"
+
+            LDFLAGS="$(cat release/LDFLAGS)"
+
+            CGO_ENABLED=0 \
+            GOOS=freebsd \
+            GOARCH="${GOARCH}" \
+            go build \
+              -mod=vendor \
+              -trimpath \
+              -tags "with_quic,with_utls" \
+              -ldflags "-X 'github.com/sagernet/sing-box/constant.Version=${VERSION}' ${LDFLAGS} -s -w -buildid=" \
+              -o "../dist/${NAME}/sing-box" \
+              ./cmd/sing-box
+
+            cp LICENSE "../dist/${NAME}/"
+
+            file "../dist/${NAME}/sing-box"
+            go version -m "../dist/${NAME}/sing-box"
+
+            if [ "${GOARCH}" != "386" ]; then
+              "../dist/${NAME}/sing-box" version
+            fi
+
+            cd ../dist
+
+            tar -czf "${NAME}.tar.gz" "${NAME}"
+            sha256 -q "${NAME}.tar.gz" | awk -v f="${NAME}.tar.gz" '{print $1 "  " f}' > "${NAME}.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sing-box-freebsd-${{ matrix.name }}
+          path: |
+            dist/sing-box-freebsd-${{ matrix.name }}.tar.gz
+            dist/sing-box-freebsd-${{ matrix.name }}.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    name: Release
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: sing-box-freebsd-*
+          merge-multiple: true
+
+      - name: Upload Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SINGBOX_REF: ${{ inputs.singbox_ref }}
+        run: |
+          set -euo pipefail
+
+          TAG="${SINGBOX_REF}"
+
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" \
+              dist/*.tar.gz \
+              dist/*.sha256 \
+              --clobber \
+              --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${TAG}" \
+              dist/*.tar.gz \
+              dist/*.sha256 \
+              --title "sing-box ${SINGBOX_REF} FreeBSD" \
+              --notes "FreeBSD builds: x64, x86, arm64 and riscv64." \
+              --repo "${GITHUB_REPOSITORY}"
+          fi
