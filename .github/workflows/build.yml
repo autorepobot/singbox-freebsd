@@ -18,7 +18,7 @@ env:
 jobs:
   build:
     name: FreeBSD ${{ matrix.name }}
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
 
     strategy:
@@ -26,32 +26,32 @@ jobs:
       matrix:
         include:
           - name: x64
+            runner: ubuntu-24.04
             vm_arch: x86_64
             goarch: amd64
             go_host_arch: amd64
             freebsd: "15.1"
-            sync: rsync
 
           - name: x86
+            runner: ubuntu-24.04
             vm_arch: x86_64
             goarch: "386"
             go_host_arch: amd64
             freebsd: "14.5"
-            sync: rsync
 
           - name: arm64
+            runner: ubuntu-24.04-arm
             vm_arch: aarch64
             goarch: arm64
             go_host_arch: arm64
             freebsd: "15.1"
-            sync: rsync
 
           - name: riscv64
-            vm_arch: riscv64
+            runner: ubuntu-24.04-arm
+            vm_arch: aarch64
             goarch: riscv64
-            go_host_arch: riscv64
+            go_host_arch: arm64
             freebsd: "15.1"
-            sync: scp
 
     steps:
       - uses: actions/checkout@v7
@@ -67,17 +67,17 @@ jobs:
         with:
           release: ${{ matrix.freebsd }}
           arch: ${{ matrix.vm_arch }}
-          sync: ${{ matrix.sync }}
+          sync: rsync
           copyback: true
           run: |
             set -eu
 
             GO_VERSION="${{ env.GO_VERSION }}"
-            GO_HOST_ARCH="${{ matrix.go_host_arch }}"
             GOARCH="${{ matrix.goarch }}"
-            NAME="sing-box-freebsd-${{ matrix.name }}"
+            GO_HOST_ARCH="${{ matrix.go_host_arch }}"
             VERSION="${{ inputs.singbox_ref }}"
             VERSION="${VERSION#v}"
+            NAME="sing-box-freebsd-${{ matrix.name }}"
 
             fetch -o /tmp/go.tar.gz \
               "https://go.dev/dl/go${GO_VERSION}.freebsd-${GO_HOST_ARCH}.tar.gz"
@@ -132,14 +132,20 @@ jobs:
             file "../dist/${NAME}/sing-box"
             go version -m "../dist/${NAME}/sing-box"
 
-            if [ "${GOARCH}" != "386" ]; then
+            if [ "${{ matrix.name }}" = "x64" ] || \
+               [ "${{ matrix.name }}" = "arm64" ]; then
               "../dist/${NAME}/sing-box" version
             fi
 
             cd ../dist
 
             tar -czf "${NAME}.tar.gz" "${NAME}"
-            sha256 -q "${NAME}.tar.gz" | awk -v f="${NAME}.tar.gz" '{print $1 "  " f}' > "${NAME}.tar.gz.sha256"
+
+            SHA256="$(sha256 -q "${NAME}.tar.gz")"
+            printf '%s  %s\n' \
+              "${SHA256}" \
+              "${NAME}.tar.gz" \
+              > "${NAME}.tar.gz.sha256"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -147,6 +153,7 @@ jobs:
           path: |
             dist/sing-box-freebsd-${{ matrix.name }}.tar.gz
             dist/sing-box-freebsd-${{ matrix.name }}.tar.gz.sha256
+          compression-level: 0
           if-no-files-found: error
 
   release:
@@ -161,26 +168,32 @@ jobs:
           pattern: sing-box-freebsd-*
           merge-multiple: true
 
-      - name: Upload Release
+      - name: Release
         env:
           GH_TOKEN: ${{ github.token }}
-          SINGBOX_REF: ${{ inputs.singbox_ref }}
+          TAG: ${{ inputs.singbox_ref }}
         run: |
           set -euo pipefail
 
-          TAG="${SINGBOX_REF}"
+          ls -lh dist
 
-          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+          if gh release view "${TAG}" \
+            --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+
             gh release upload "${TAG}" \
               dist/*.tar.gz \
               dist/*.sha256 \
               --clobber \
               --repo "${GITHUB_REPOSITORY}"
+
           else
+
             gh release create "${TAG}" \
               dist/*.tar.gz \
               dist/*.sha256 \
-              --title "sing-box ${SINGBOX_REF} FreeBSD" \
-              --notes "FreeBSD builds: x64, x86, arm64 and riscv64." \
+              --target "${GITHUB_SHA}" \
+              --title "sing-box ${TAG} FreeBSD" \
+              --notes "FreeBSD builds for x64, x86, arm64 and riscv64." \
               --repo "${GITHUB_REPOSITORY}"
+
           fi
